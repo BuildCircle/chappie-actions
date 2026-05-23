@@ -1,0 +1,426 @@
+name: Agent (canonical)
+
+# Public reusable workflow. Consumer repos call this via a thin stub.
+# Runtime work runs in the pinned GHCR image; this file is orchestration only.
+
+on:
+  workflow_call:
+    inputs:
+      prompt:
+        description: Natural language prompt for the agent
+        required: true
+        type: string
+      triggerRef:
+        description: Issue number, ticket key, or other back-link reference
+        required: false
+        type: string
+        default: ""
+      branch:
+        description: Existing branch to push to (PR-steering mode). Empty creates a fresh branch and opens a PR.
+        required: false
+        type: string
+        default: ""
+      vendor:
+        description: Agent runtime vendor (cursor, claude, codex, openai, gemini)
+        required: false
+        type: string
+        default: claude
+      client:
+        description: Client slug for bootstrap scope
+        required: true
+        type: string
+      project:
+        description: Project slug for bootstrap scope
+        required: true
+        type: string
+      clientOverlayPath:
+        description: Optional path in the consumer repo to a per-client overlay tree
+        required: false
+        type: string
+        default: ""
+    secrets:
+      CURSOR_API_KEY:
+        required: false
+      ANTHROPIC_API_KEY:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+      GOOGLE_API_KEY:
+        required: false
+      CHAPPIE_PUSH_TOKEN:
+        required: true
+      JOURNIX_API_URL:
+        required: false
+      JOURNIX_BASIC_USER:
+        required: false
+      JOURNIX_BASIC_PASSWORD:
+        required: false
+
+env:
+  CHAPPIE_IMAGE: ghcr.io/buildcircle/chappie-cli:v1
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "chappie-bot"
+          git config user.email "chappie-bot@users.noreply.github.com"
+
+      - name: Resolve working branch
+        id: branch
+        env:
+          REF: ${{ inputs.triggerRef }}
+          EXISTING: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$EXISTING" ]]; then
+            git fetch origin "$EXISTING"
+            git checkout "$EXISTING"
+            echo "name=$EXISTING" >> "$GITHUB_OUTPUT"
+          else
+            safe=$(printf "%s" "$REF" | tr -dc 'A-Za-z0-9-' | head -c 32)
+            branch="chappie/${safe:-run}-${GITHUB_RUN_ID}"
+            git checkout -b "$branch"
+            echo "name=$branch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare runtime workspace
+        run: mkdir -p "$RUNNER_TEMP/chappie"
+
+      - name: Pull runtime image
+        run: docker pull "$CHAPPIE_IMAGE"
+
+      - name: Bootstrap runtime contract
+        id: bootstrap
+        env:
+          OVERLAY: ${{ inputs.clientOverlayPath }}
+        run: |
+          set -euo pipefail
+          args=(
+            bootstrap
+            --client "${{ inputs.client }}"
+            --project "${{ inputs.project }}"
+            --repo "${{ github.repository }}"
+            --profile develop
+            --format pretty
+          )
+          if [[ -n "$OVERLAY" ]]; then
+            args+=(--client-overlay "/work/$OVERLAY")
+          fi
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/chappie:/out" \
+            -w /work \
+            "$CHAPPIE_IMAGE" \
+            "${args[@]}" > "$RUNNER_TEMP/chappie/bootstrap.json"
+          cat "$RUNNER_TEMP/chappie/bootstrap.json"
+
+      - name: Build agent prompt
+        id: author_prompt
+        env:
+          GH_TOKEN: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
+          REF: ${{ inputs.triggerRef }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${{ inputs.prompt }}" > "$RUNNER_TEMP/chappie/base-prompt.txt"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/chappie:/out" \
+            -w /work \
+            -e GH_TOKEN \
+            "$CHAPPIE_IMAGE" \
+            author-prompt \
+              --bootstrap /out/bootstrap.json \
+              --prompt-file /out/base-prompt.txt \
+              --trigger-ref "$REF" \
+              --repo "$REPO" \
+              --output /out/prompt.txt \
+              --pr-title-file /out/pr-title.txt \
+              --pr-body-file /out/pr-body.md \
+            | tee /tmp/chappie-author-tier.log
+          tier=$(grep -E '^tier=' /tmp/chappie-author-tier.log | tail -n1 | cut -d= -f2-)
+          echo "tier=${tier:-code}" >> "$GITHUB_OUTPUT"
+
+      - name: Run agent
+        id: agent
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GH_TOKEN: ${{ inputs.branch != '' && github.token || secrets.CHAPPIE_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          MAX_ATTEMPTS=3
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            rm -f "$RUNNER_TEMP/chappie/agent-run-report.json"
+            set +e
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE:/work" \
+              -v "$RUNNER_TEMP/chappie:/out" \
+              -w /work \
+              -e ANTHROPIC_API_KEY -e CURSOR_API_KEY -e OPENAI_API_KEY -e GOOGLE_API_KEY -e GH_TOKEN \
+              "$CHAPPIE_IMAGE" \
+              run-agent \
+                --vendor "${{ inputs.vendor }}" \
+                --prompt-file /out/prompt.txt \
+                --report /out/agent-run-report.json
+            ec=$?
+            set -e
+            if [[ "$ec" -eq 0 ]]; then
+              echo "agent_outcome=success" >> "$GITHUB_OUTPUT"
+              echo "failure_category=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            retryable=false
+            category=unknown
+            if [[ -f "$RUNNER_TEMP/chappie/agent-run-report.json" ]]; then
+              retryable=$(jq -r 'if .retryable == true then "true" else "false" end' "$RUNNER_TEMP/chappie/agent-run-report.json")
+              category=$(jq -r '.failureCategory // "unknown"' "$RUNNER_TEMP/chappie/agent-run-report.json")
+            fi
+            echo "::notice::agent attempt $attempt/$MAX_ATTEMPTS failed (exit $ec, category=$category, retryable=$retryable)"
+            if [[ "$retryable" == "true" && "$attempt" -lt "$MAX_ATTEMPTS" ]]; then
+              sleep $((30 * (2 ** (attempt - 1))))
+            else
+              {
+                echo "agent_outcome=failure"
+                echo "failure_category=$category"
+                echo "last_agent_exit=$ec"
+              } >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          done
+
+      - name: Detect changes
+        id: changes
+        if: always()
+        run: |
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Destructive-op guardrail
+        if: steps.agent.outcome == 'success' && steps.changes.outputs.changed == 'true'
+        run: |
+          git add -A
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            "$CHAPPIE_IMAGE" \
+            destructive-op-check
+
+      - name: Markdown prose gates
+        if: steps.agent.outcome == 'success' && steps.changes.outputs.changed == 'true'
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            "$CHAPPIE_IMAGE" \
+            prose-gates
+
+      - name: Run required checks
+        id: checks
+        if: steps.agent.outcome == 'success' && steps.changes.outputs.changed == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          set +e
+          output=$(docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/chappie:/out" \
+            -w /work \
+            "$CHAPPIE_IMAGE" \
+            run-checks \
+              --bootstrap /out/bootstrap.json \
+              --output-dir /out 2>&1)
+          ec=$?
+          set -e
+          echo "$output"
+          any_failed=$(printf '%s\n' "$output" | grep -E '^any_failed=' | tail -n1 | cut -d= -f2-)
+          echo "any_failed=${any_failed:-1}" >> "$GITHUB_OUTPUT"
+          if [[ "$ec" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Commit and push
+        if: steps.agent.outcome == 'success' && steps.changes.outputs.changed == 'true'
+        env:
+          REF: ${{ inputs.triggerRef }}
+          STATUS: ${{ steps.checks.outputs.any_failed == '1' && 'fail' || 'pass' }}
+        run: |
+          set -euo pipefail
+          git add -A
+          git commit -m "agent: ${REF:-run} [checks: $STATUS]"
+          BRANCH="${{ steps.branch.outputs.name }}"
+          for i in 1 2 3; do
+            if git push origin "$BRANCH"; then
+              exit 0
+            fi
+            echo "::warning::git push failed (attempt $i); retrying with backoff" >&2
+            sleep $((20 * i))
+          done
+          echo "::error::git push failed after retries"
+          exit 1
+
+      - name: Open PR
+        if: steps.agent.outcome == 'success' && steps.changes.outputs.changed == 'true' && inputs.branch == ''
+        env:
+          GH_TOKEN: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
+          REF: ${{ inputs.triggerRef }}
+          REPO: ${{ github.repository }}
+          OUT: ${{ runner.temp }}/chappie
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          HEAD_BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          set -euo pipefail
+          TITLE_FILE="$OUT/pr-title.txt"
+          BODY_FILE="$OUT/pr-body.md"
+          if [[ -s "$TITLE_FILE" ]]; then
+            TITLE=$(head -n1 "$TITLE_FILE" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          fi
+          if [[ -z "${TITLE:-}" ]]; then
+            TITLE="chore(agent): ${REF:-run}"
+          fi
+          if [[ ! -s "$BODY_FILE" ]]; then
+            if [[ -n "$REF" && "$REF" =~ ^[0-9]+$ ]]; then
+              echo "Closes https://github.com/${REPO}/issues/${REF}" > "$BODY_FILE"
+            else
+              echo "Agent run." > "$BODY_FILE"
+            fi
+          fi
+          gh label create chappie --color 1D76DB --description "Opened or driven by chappie agent workflows" 2>/dev/null || true
+          gh pr create \
+            --label chappie \
+            --title "$TITLE" \
+            --body-file "$BODY_FILE" \
+            --base "$BASE_BRANCH" \
+            --head "$HEAD_BRANCH"
+
+      - name: Comment back on issue
+        if: steps.agent.outcome == 'success' && steps.changes.outputs.changed == 'true' && github.event_name == 'issue_comment' && inputs.branch == ''
+        env:
+          GH_TOKEN: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
+          REF: ${{ inputs.triggerRef }}
+          STATUS: ${{ steps.checks.outputs.any_failed == '1' && 'failed' || 'passed' }}
+        run: |
+          gh issue comment "$REF" --body "Agent pushed branch \`${{ steps.branch.outputs.name }}\` and opened a PR. Required checks: $STATUS."
+
+      - name: Report no-op
+        if: steps.agent.outcome == 'success' && steps.changes.outputs.changed != 'true' && inputs.branch == '' && inputs.triggerRef != ''
+        env:
+          GH_TOKEN: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
+          REF: ${{ inputs.triggerRef }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" =~ ^[0-9]+$ ]]; then
+            gh issue comment "$REF" --body "Agent ran but produced no changes. Run: $RUN_URL"
+          fi
+
+      - name: Post steering reply
+        if: steps.agent.outcome == 'success' && inputs.branch != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.triggerRef }}
+          REPO: ${{ github.repository }}
+          REPLY_FILE: /tmp/chappie-steering-reply.txt
+        run: |
+          set -euo pipefail
+          if [[ ! -s "$REPLY_FILE" ]]; then
+            echo "::notice::no steering reply at $REPLY_FILE; skipping comment"
+            exit 0
+          fi
+          PR_NUMBER="${REF#pr-}"
+          if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::warning::triggerRef ($REF) not in pr-<number> form; skipping reply"
+            exit 0
+          fi
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$REPLY_FILE"
+
+      - name: Push agent run journal
+        if: steps.agent.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
+          JOURNIX_API_URL: ${{ secrets.JOURNIX_API_URL }}
+          JOURNIX_BASIC_USER: ${{ secrets.JOURNIX_BASIC_USER }}
+          JOURNIX_BASIC_PASSWORD: ${{ secrets.JOURNIX_BASIC_PASSWORD }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REF: ${{ inputs.triggerRef }}
+          BRANCH_NAME: ${{ steps.branch.outputs.name }}
+          CHANGED: ${{ steps.changes.outputs.changed }}
+          STEERING: ${{ inputs.branch != '' }}
+          CHECKS_FAILED: ${{ steps.checks.outputs.any_failed }}
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/chappie:/out" \
+            -w /work \
+            -e GH_TOKEN -e JOURNIX_API_URL -e JOURNIX_BASIC_USER -e JOURNIX_BASIC_PASSWORD \
+            -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            "$CHAPPIE_IMAGE" \
+            journal-run \
+              --bootstrap /out/bootstrap.json \
+              --output-dir /out \
+              --repo "$REPO" \
+              --run-url "$RUN_URL" \
+              --trigger-ref "$REF" \
+              --branch-name "$BRANCH_NAME" \
+              --changed "$CHANGED" \
+              --steering "$STEERING" \
+              --checks-failed "${CHECKS_FAILED:-}"
+
+      - name: Salvage partial progress after agent failure
+        if: steps.agent.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
+          REF: ${{ inputs.triggerRef }}
+          OUT: ${{ runner.temp }}/chappie
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          HEAD_BRANCH: ${{ steps.branch.outputs.name }}
+          STEERING_BRANCH: ${{ inputs.branch }}
+          CATEGORY: ${{ steps.agent.outputs.failure_category }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOURNIX_API_URL: ${{ secrets.JOURNIX_API_URL }}
+          JOURNIX_BASIC_USER: ${{ secrets.JOURNIX_BASIC_USER }}
+          JOURNIX_BASIC_PASSWORD: ${{ secrets.JOURNIX_BASIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -v "$RUNNER_TEMP/chappie:/out" \
+            -w /work \
+            -e GH_TOKEN -e JOURNIX_API_URL -e JOURNIX_BASIC_USER -e JOURNIX_BASIC_PASSWORD \
+            -e GITHUB_RUN_ID="${{ github.run_id }}" \
+            "$CHAPPIE_IMAGE" \
+            salvage \
+              --bootstrap /out/bootstrap.json \
+              --output-dir /out \
+              --head-branch "$HEAD_BRANCH" \
+              --base-branch "$BASE_BRANCH" \
+              --trigger-ref "$REF" \
+              --steering-branch "$STEERING_BRANCH" \
+              --category "$CATEGORY" \
+              --run-url "$RUN_URL" \
+              --report /out/agent-run-report.json
+
+      - name: Fail job after terminal agent error
+        if: steps.agent.outcome == 'failure'
+        run: exit 1
