@@ -2,6 +2,7 @@ name: Agent (canonical)
 
 # Public reusable workflow. Consumer repos call this via a thin stub.
 # Runtime work runs in the pinned GHCR image; this file is orchestration only.
+# CHAPPIE_PUSH_TOKEN is a short-lived App installation token (or PAT exception per docs/auth.md).
 
 on:
   workflow_call:
@@ -80,9 +81,22 @@ jobs:
           token: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
 
       - name: Configure git identity
+        env:
+          GH_TOKEN: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
         run: |
-          git config user.name "chappie-bot"
-          git config user.email "chappie-bot@users.noreply.github.com"
+          set -euo pipefail
+          slug=$(gh api /app --jq .slug 2>/dev/null || true)
+          if [[ -n "$slug" ]]; then
+            bot="${slug}[bot]"
+            uid=$(gh api "/users/${bot}" --jq .id 2>/dev/null || true)
+          fi
+          if [[ -n "${uid:-}" ]]; then
+            git config user.name "$bot"
+            git config user.email "${uid}+${bot}@users.noreply.github.com"
+          else
+            git config user.name "chappie-bot"
+            git config user.email "chappie-bot@users.noreply.github.com"
+          fi
 
       - name: Resolve working branch
         id: branch
