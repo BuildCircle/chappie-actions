@@ -26,6 +26,7 @@ When a new major runtime is published, bump the tag in your stub deliberately.
 | `triggerRef` | Optional issue number or external ticket reference |
 | `branch` | Optional existing branch for PR-steering mode |
 | `clientOverlayPath` | Optional path in your repo to a private overlay tree |
+| `appBotLogin` | Optional App slug from the stub's mint step, for git author identity |
 
 ## Required secrets
 
@@ -62,6 +63,7 @@ jobs:
     timeout-minutes: 2
     outputs:
       token: ${{ steps.app.outputs.token }}
+      appBotLogin: ${{ steps.app.outputs.app-slug }}
     steps:
       - id: app
         uses: actions/create-github-app-token@v2
@@ -82,6 +84,7 @@ jobs:
       client: your-client-slug
       project: your-project-slug
       # profile: develop  # optional; defaults to develop
+      appBotLogin: ${{ needs.mint.outputs.appBotLogin }}
     secrets:
       CHAPPIE_PUSH_TOKEN: ${{ needs.mint.outputs.token }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -44,6 +44,11 @@ on:
         required: false
         type: string
         default: ""
+      appBotLogin:
+        description: Optional GitHub App bot login, usually steps.app.outputs.app-slug from actions/create-github-app-token
+        required: false
+        type: string
+        default: ""
     secrets:
       CURSOR_API_KEY:
         required: false
@@ -83,11 +88,14 @@ jobs:
       - name: Configure git identity
         env:
           GH_TOKEN: ${{ secrets.CHAPPIE_PUSH_TOKEN }}
+          APP_BOT_LOGIN: ${{ inputs.appBotLogin }}
         run: |
           set -euo pipefail
-          slug=$(gh api /app --jq .slug 2>/dev/null || true)
-          if [[ -n "$slug" ]]; then
-            bot="${slug}[bot]"
+          bot="${APP_BOT_LOGIN:-}"
+          if [[ -n "$bot" && "$bot" != *"[bot]" ]]; then
+            bot="${bot}[bot]"
+          fi
+          if [[ -n "$bot" ]]; then
             uid=$(gh api "/users/${bot}" --jq .id 2>/dev/null || true)
           fi
           if [[ -n "${uid:-}" ]]; then
