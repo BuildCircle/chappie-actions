@@ -21,6 +21,7 @@ When a new major runtime is published, bump the tag in your stub deliberately.
 | `prompt` | Natural language task for the agent |
 | `client` | Client slug registered in the runtime pack |
 | `project` | Project slug registered in the runtime pack |
+| `profile` | Agent profile slug (default `develop`) |
 | `vendor` | Agent vendor: `cursor`, `claude`, `codex`, `openai`, or `gemini` |
 | `triggerRef` | Optional issue number or external ticket reference |
 | `branch` | Optional existing branch for PR-steering mode |

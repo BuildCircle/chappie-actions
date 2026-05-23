@@ -33,6 +33,11 @@ on:
         description: Project slug for bootstrap scope
         required: true
         type: string
+      profile:
+        description: Agent profile slug from the runtime pack
+        required: false
+        type: string
+        default: develop
       clientOverlayPath:
         description: Optional path in the consumer repo to a per-client overlay tree
         required: false
@@ -114,7 +119,7 @@ jobs:
             --client "${{ inputs.client }}"
             --project "${{ inputs.project }}"
             --repo "${{ github.repository }}"
-            --profile develop
+            --profile "${{ inputs.profile }}"
             --format pretty
           )
           if [[ -n "$OVERLAY" ]]; then
