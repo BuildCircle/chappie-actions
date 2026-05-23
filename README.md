@@ -70,6 +70,7 @@ jobs:
         with:
           app-id: ${{ secrets.CHAPPIE_APP_ID }}
           private-key: ${{ secrets.CHAPPIE_APP_PRIVATE_KEY }}
+          skip-token-revoke: true
 
   agent:
     needs: mint
