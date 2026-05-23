@@ -26,18 +26,26 @@ When a new major runtime is published, bump the tag in your stub deliberately.
 | `triggerRef` | Optional issue number or external ticket reference |
 | `branch` | Optional existing branch for PR-steering mode |
 | `clientOverlayPath` | Optional path in your repo to a private overlay tree |
+| `appBotLogin` | Optional App slug from the stub's mint step, for git author identity |
 
 ## Required secrets
 
+Store these as org-level or environment-scoped Actions secrets on the consumer repo:
+
 | Secret | When |
 |---|---|
-| `CHAPPIE_PUSH_TOKEN` | Always. PAT or App token with `workflow` scope for pushes and PR creation |
+| `CHAPPIE_APP_ID` | Always. chappie GitHub App id |
+| `CHAPPIE_APP_PRIVATE_KEY` | Always. Stub mints a short-lived installation token per run |
 | `CURSOR_API_KEY` | When `vendor: cursor` |
 | `ANTHROPIC_API_KEY` | When `vendor: claude` |
 | `OPENAI_API_KEY` | When `vendor: openai` or `vendor: codex` |
 | `GOOGLE_API_KEY` | When `vendor: gemini` |
 
 Optional Journix secrets (`JOURNIX_API_URL`, `JOURNIX_BASIC_USER`, `JOURNIX_BASIC_PASSWORD`) enable best-effort journal push after successful runs.
+
+The reusable `agent.yml` contract still accepts `CHAPPIE_PUSH_TOKEN`. Caller stubs mint an installation token from the App credentials and pass it into that slot. Do not store a long-lived installation token or human PAT as `CHAPPIE_PUSH_TOKEN`.
+
+App permissions and the bot login slug are documented in [`BuildCircle/chappie` docs/auth.md](https://github.com/BuildCircle/chappie/blob/main/docs/auth.md).
 
 ## Stub example (GitHub Issues)
 
@@ -47,7 +55,25 @@ on:
   issue_comment:
     types: [created]
 jobs:
+  mint:
+    if: |
+      github.event.issue.pull_request == null
+      && startsWith(github.event.comment.body, '/agent')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      token: ${{ steps.app.outputs.token }}
+      appBotLogin: ${{ steps.app.outputs.app-slug }}
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CHAPPIE_APP_ID }}
+          private-key: ${{ secrets.CHAPPIE_APP_PRIVATE_KEY }}
+          skip-token-revoke: true
+
   agent:
+    needs: mint
     if: |
       github.event.issue.pull_request == null
       && startsWith(github.event.comment.body, '/agent')
@@ -59,7 +85,10 @@ jobs:
       client: your-client-slug
       project: your-project-slug
       # profile: develop  # optional; defaults to develop
-    secrets: inherit
+      appBotLogin: ${{ needs.mint.outputs.appBotLogin }}
+    secrets:
+      CHAPPIE_PUSH_TOKEN: ${{ needs.mint.outputs.token }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 ## Registration
