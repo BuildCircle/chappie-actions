@@ -58,6 +58,7 @@ jobs:
       vendor: claude
       client: your-client-slug
       project: your-project-slug
+      # profile: develop  # optional; defaults to develop
     secrets: inherit
 ```
 
