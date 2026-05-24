@@ -2,7 +2,7 @@ name: Agent (canonical)
 
 # Public reusable workflow. Consumer repos call this via a thin stub.
 # Runtime work runs in the pinned GHCR image; this file is orchestration only.
-# CHAPPIE_PUSH_TOKEN is a short-lived App installation token (or PAT exception per docs/auth.md).
+# CHAPPIE_PUSH_TOKEN is a short-lived App installation token (see docs/auth.md).
 
 on:
   workflow_call:
@@ -95,16 +95,17 @@ jobs:
           if [[ -n "$bot" && "$bot" != *"[bot]" ]]; then
             bot="${bot}[bot]"
           fi
-          if [[ -n "$bot" ]]; then
-            uid=$(gh api "/users/${bot}" --jq .id 2>/dev/null || true)
+          if [[ -z "$bot" ]]; then
+            echo "::error::appBotLogin input is required (pass steps.app.outputs.app-slug from the stub mint step)"
+            exit 1
           fi
-          if [[ -n "${uid:-}" ]]; then
-            git config user.name "$bot"
-            git config user.email "${uid}+${bot}@users.noreply.github.com"
-          else
-            git config user.name "chappie-bot"
-            git config user.email "chappie-bot@users.noreply.github.com"
+          uid=$(gh api "/users/${bot}" --jq .id 2>/dev/null || true)
+          if [[ -z "${uid:-}" ]]; then
+            echo "::error::App bot user lookup failed for ${bot}"
+            exit 1
           fi
+          git config user.name "$bot"
+          git config user.email "${uid}+${bot}@users.noreply.github.com"
 
       - name: Resolve working branch
         id: branch
