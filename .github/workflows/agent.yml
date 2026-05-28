@@ -91,21 +91,18 @@ jobs:
           APP_BOT_LOGIN: ${{ inputs.appBotLogin }}
         run: |
           set -euo pipefail
-          bot="${APP_BOT_LOGIN:-}"
-          if [[ -n "$bot" && "$bot" != *"[bot]" ]]; then
-            bot="${bot}[bot]"
-          fi
-          if [[ -z "$bot" ]]; then
-            echo "::error::appBotLogin input is required (pass steps.app.outputs.app-slug from the stub mint step)"
+          login="${APP_BOT_LOGIN:-}"
+          if [[ -z "$login" ]]; then
+            echo "::error::appBotLogin input is required"
             exit 1
           fi
-          uid=$(gh api "/users/${bot}" --jq .id 2>/dev/null || true)
+          uid=$(gh api "/users/${login}" --jq .id 2>/dev/null || true)
           if [[ -z "${uid:-}" ]]; then
-            echo "::error::App bot user lookup failed for ${bot}"
+            echo "::error::User lookup failed for ${login}"
             exit 1
           fi
-          git config user.name "$bot"
-          git config user.email "${uid}+${bot}@users.noreply.github.com"
+          git config user.name "$login"
+          git config user.email "${uid}+${login}@users.noreply.github.com"
 
       - name: Resolve working branch
         id: branch
