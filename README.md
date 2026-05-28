@@ -2,7 +2,7 @@
 
 Public companion repo for cross-org Chappie consumers. Contains **only** reusable GitHub Actions workflows and this README.
 
-Private source, agent packs, and runtime logic live in the [`BuildCircle/chappie`](https://github.com/BuildCircle/chappie) monorepo and ship as the public GHCR image `ghcr.io/buildcircle/chappie-cli:v1`.
+Private source, agent packs, and runtime logic live in the [`BuildCircle/chappie`](https://github.com/BuildCircle/chappie) monorepo and ship as the GHCR image `ghcr.io/buildcircle/chappie-cli:v1`. Until the package is made public (#266), consumer stubs must pass `CHAPPIE_GHCR_TOKEN` so `agent.yml` can authenticate the pull (see Required secrets).
 
 ## Pinning policy
 
@@ -36,6 +36,7 @@ Store these as org-level or environment-scoped Actions secrets on the consumer r
 |---|---|
 | `CHAPPIE_APP_ID` | Always. chappie GitHub App id |
 | `CHAPPIE_APP_PRIVATE_KEY` | Always. Stub mints a short-lived installation token per run |
+| `CHAPPIE_GHCR_TOKEN` | Until package is public (#266). PAT with `read:packages` for `buildcircle-chappie-bot` |
 | `CURSOR_API_KEY` | When `vendor: cursor` |
 | `ANTHROPIC_API_KEY` | When `vendor: claude` |
 | `OPENAI_API_KEY` | When `vendor: openai` or `vendor: codex` |
@@ -88,6 +89,7 @@ jobs:
       appBotLogin: ${{ needs.mint.outputs.appBotLogin }}
     secrets:
       CHAPPIE_PUSH_TOKEN: ${{ needs.mint.outputs.token }}
+      CHAPPIE_GHCR_TOKEN: ${{ secrets.CHAPPIE_GHCR_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 

@@ -60,6 +60,8 @@ on:
         required: false
       CHAPPIE_PUSH_TOKEN:
         required: true
+      CHAPPIE_GHCR_TOKEN:
+        required: false
       JOURNIX_API_URL:
         required: false
       JOURNIX_BASIC_USER:
@@ -79,6 +81,8 @@ jobs:
   run-agent:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      HAS_GHCR: ${{ secrets.CHAPPIE_GHCR_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,6 +128,14 @@ jobs:
 
       - name: Prepare runtime workspace
         run: mkdir -p "$RUNNER_TEMP/chappie"
+
+      - name: Log in to GHCR
+        if: env.HAS_GHCR == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: buildcircle-chappie-bot
+          password: ${{ secrets.CHAPPIE_GHCR_TOKEN }}
 
       - name: Pull runtime image
         run: docker pull "$CHAPPIE_IMAGE"
